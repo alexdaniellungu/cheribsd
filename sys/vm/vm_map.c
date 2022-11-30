@@ -999,6 +999,7 @@ _vm_map_init(vm_map_t map, pmap_t pmap, vm_pointer_t min, vm_pointer_t max)
 
 #ifdef CHERI_CAPREVOKE
 	map->vm_cheri_revoke_st = CHERI_REVOKE_ST_NONE; /* and epoch 0 */
+	LIST_INIT(&map->quarantine);
 #endif
 }
 
@@ -1576,11 +1577,72 @@ vm_map_entry_unlink(vm_map_t map, vm_map_entry_t entry,
 	if (root != NULL)
 		root->max_free = vm_size_max(max_free_left, max_free_right);
 	map->root = root;
+#ifdef CHERI_CAPREVOKE
+	if (entry->inheritance == VM_INHERIT_QUARANTINE) {
+		LIST_REMOVE(entry, quarantine);
+	}
+#endif
 	VM_MAP_ASSERT_CONSISTENT(map);
 	map->nentries--;
 	CTR3(KTR_VM, "vm_map_entry_unlink: map %p, nentries %d, entry %p", map,
 	    map->nentries, entry);
 }
+
+#ifdef CHERI_CAPREVOKE
+static void
+vm_map_entry_quarantine(vm_map_t map, vm_map_entry_t entry)
+{
+	KASSERT((entry->eflags & MAP_ENTRY_UNMAPPED) != 0,
+	    ("Can only quarantine unmappled pages %x\n", entry->eflags));
+	CTR3(KTR_VM,
+	    __func__ ": map %p, nentries %d, entry %p", map, map->nentries,
+	    entry);
+	VM_MAP_ASSERT_LOCKED(map);
+	/*
+	 * XXX: We should try to merge with immediate neighbors (but not
+	 * with map->rev_entry).
+	 */
+	entry->inheritance = VM_INHERIT_QUARANTINE;
+	LIST_INSERT_HEAD(&map->quarantine, entry, quarantine);
+	/* XXX stats */
+}
+
+boolean_t
+vm_map_entry_start_revocation(vm_map_t map, vm_map_entry_t *entry) {
+
+	KASSERT(map->rev_entry == NULL,
+	   ("an entry %p is already being revoked", map->rev_entry));
+	VM_MAP_ASSERT_LOCKED(map);
+	if (LIST_EMPTY(&map->quarantine))
+		return (FALSE);
+	/*
+	 * Just pop the most recent entry off the list to do something.
+	 *
+	 * We'll eventually want this to find the "most impactful" entry
+	 * to free and expand the selection to include non-adjacent
+	 * neighbors in order to return at much VA to use as possible in
+	 * a given round of revocation.
+	 */
+	map->rev_entry = LIST_FIRST(&map->quarantine);
+	if (entry != NULL)
+		*entry = map->rev_entry;
+	/* XXX stats */
+	return (TRUE);
+}
+
+void
+vm_map_entry_end_revocation(vm_map_t map)
+{
+	if (map->rev_entry == NULL)
+		return;	/* we weren't revoking a map entry this round */
+
+	vm_map_lock(map);
+	vm_map_entry_unlink(map, map->rev_entry, UNLINK_MERGE_NONE);
+	map->rev_entry = NULL;
+	/* XXX stats */
+	vm_map_unlock(map);
+}
+#endif
 
 /*
  *	vm_map_entry_resize:
@@ -1769,6 +1831,7 @@ vm_map_insert(vm_map_t map, vm_object_t object, vm_ooffset_t offset,
 		    new_entry->reservation != reservation)
 			return (KERN_PROTECTION_FAILURE);
 		if ((new_entry->eflags & MAP_ENTRY_UNMAPPED) == 0 ||
+		    new_entry->inheritance == VM_INHERIT_QUARANTINE ||
 		    new_entry->end < end)
 			return (KERN_NO_SPACE);
 		/* XXX-AM: TODO Check maxprot consistency with the reserved entry */
@@ -4544,8 +4607,15 @@ vm_map_remove_locked(vm_map_t map, vm_offset_t start, vm_offset_t end)
 	}
 
 	result = vm_map_delete(map, start, end, true);
-	if (vm_map_reservation_is_unmapped(map, reservation))
-		vm_map_reservation_delete_locked(map, reservation);
+	if (vm_map_reservation_is_unmapped(map, reservation)) {
+#ifdef CHERI_CAPREVOKE
+		if (start < VM_MAXUSER_ADDRESS) {
+			vm_map_lookup_entry(map, start, &entry);
+			vm_map_entry_quarantine(map, entry);
+		} else
+#endif
+			vm_map_reservation_delete_locked(map, reservation);
+	}
 
 	return (result);
 }
@@ -4893,7 +4963,7 @@ vmspace_fork(struct vmspace *vm1, vm_ooffset_t *fork_charge)
 		inh = old_entry->inheritance;
 		if ((old_entry->eflags &
 		    (MAP_ENTRY_GUARD | MAP_ENTRY_UNMAPPED)) != 0 &&
-		    inh != VM_INHERIT_NONE)
+		    inh != VM_INHERIT_NONE && inh != VM_INHERIT_QUARANTINE)
 			inh = VM_INHERIT_COPY;
 
 		switch (inh) {
@@ -5045,6 +5115,24 @@ vmspace_fork(struct vmspace *vm1, vm_ooffset_t *fork_charge)
 			*fork_charge += (new_entry->end - new_entry->start);
 
 			break;
+
+#ifdef CHERI_CAPREVOKE
+		case VM_INHERIT_QUARANTINE:
+			new_entry = vm_map_entry_create(new_map);
+			memset(new_entry, 0, sizeof(*new_entry));
+			new_entry->start = old_entry->start;
+			new_entry->end = old_entry->end;
+			new_entry->reservation = old_entry->reservation;
+			new_entry->eflags = old_entry->eflags;
+			new_entry->inheritance = VM_INHERIT_QUARANTINE;
+			new_entry->cred = NULL;
+
+			vm_map_entry_link(new_map, new_entry);
+			vm_map_entry_quarantine(new_map, new_entry);
+			vmspace_map_entry_forked(vm1, vm2, new_entry);
+
+			break;
+#endif
 		}
 	}
 	/*
