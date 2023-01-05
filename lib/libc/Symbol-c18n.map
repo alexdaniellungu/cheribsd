@@ -7,4 +7,5 @@ FBSDprivate_1.0 {
 	_rtld_longjmp;
 	_rtld_thread_start_init;
 	_rtld_sighandler_init;
+	_rtld_sigaction;
 };

@@ -35,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/elf.h>
 #include <sys/signalvar.h>
 #include <sys/syscall.h>
+#include <assert.h>
 #include <signal.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -73,10 +74,20 @@ static void check_deferred_signal(struct pthread *);
 static void check_suspend(struct pthread *);
 static void check_cancel(struct pthread *curthread, ucontext_t *ucp);
 #if defined(__CHERI_PURE_CAPABILITY__) && defined(RTLD_SANDBOX)
+/* Export the local thr_sighandler symbol to other translation units. */
 __weak_reference(thr_sighandler, _thr_sighandler);
 void _thr_sighandler(int, siginfo_t *, void *);
+/*
+ * _rtld_sighandler is provided by the runtime linker, but the static linker is
+ * not aware of this. Use a weak reference to work around this.
+ */
 __weak_reference(thr_sighandler, _rtld_sighandler);
 void _rtld_sighandler(int, siginfo_t *, void *);
+/*
+ * _rtld_sigaction is provided by the runtime linker, but the static linker is
+ * not aware of this. Use a stub in libc to work around this.
+ */
+void _rtld_sigaction(void (**)(int, siginfo_t *, void *));
 #endif
 
 int	_sigtimedwait(const sigset_t *set, siginfo_t *info,
@@ -294,6 +305,9 @@ handle_signal(struct sigaction *actp, int sig, siginfo_t *info, ucontext_t *ucp)
 	__sys_sigprocmask(SIG_SETMASK, &actp->sa_mask, NULL);
 
 	sigfunc = actp->sa_sigaction;
+#if defined(__CHERI_PURE_CAPABILITY__) && defined(RTLD_SANDBOX)
+	assert(cheri_getperm(sigfunc) & CHERI_PERM_EXECUTIVE);
+#endif
 
 	/*
 	 * We have already reset cancellation point flags, so if user's code
@@ -626,6 +640,9 @@ __thr_sigaction(int sig, const struct sigaction *act, struct sigaction *oact)
 		 */
 		if (newact.sa_handler != SIG_DFL &&
 		    newact.sa_handler != SIG_IGN) {
+#if defined(__CHERI_PURE_CAPABILITY__) && defined(RTLD_SANDBOX)
+			_rtld_sigaction(&newact.sa_sigaction);
+#endif
 			usa->sigact = newact;
 			remove_thr_signals(&usa->sigact.sa_mask);
 			newact.sa_flags &= ~SA_NODEFER;

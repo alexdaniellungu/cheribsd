@@ -209,6 +209,10 @@ void
 _rtld_sighandler_init(void *p __unused)
 {
 }
+
+#pragma weak _rtld_sigaction
+void _rtld_sigaction(void (**actp)(int, siginfo_t *, void *) __unused) {
+}
 #endif
 
 #ifndef IN_LIBDL

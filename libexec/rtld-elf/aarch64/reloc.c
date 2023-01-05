@@ -181,6 +181,7 @@ _rtld_relocate_nonplt_self(Elf_Dyn *dynp, Elf_Auxinfo *aux)
 
 void _rtld_thread_start(struct pthread *);
 void _rtld_sighandler(int, siginfo_t *, void *);
+void _rtld_sigaction(void (**)(int, siginfo_t *, void *));
 
 struct tramp {
 	const void *target;
@@ -300,6 +301,11 @@ _rtld_sighandler(int sig, siginfo_t *info, void *_ucp)
 	rcsp = ucp->uc_mcontext.mc_capregs.cap_sp;
 	asm ("msr	rcsp_el0, %0" :: "C" (rcsp));
 	ucp->uc_mcontext.mc_capregs.cap_sp = csp;
+}
+
+void _rtld_sigaction(void (**actp)(int, siginfo_t *, void *)) {
+	if ((cheri_getperm(*actp) & CHERI_PERM_EXECUTIVE) == 0)
+		*actp = tramp_pgs_append(*actp, obj_from_addr(*actp), NULL);
 }
 
 void
