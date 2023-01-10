@@ -4670,6 +4670,14 @@ vm_map_delete(vm_map_t map, vm_offset_t start, vm_offset_t end,
 	return (rv);
 }
 
+#ifdef CHERI_CAPREVOKE
+SYSCTL_DECL(_vm_cheri_revoke);
+static bool quarantine_unmapped_reservations = true;
+SYSCTL_BOOL(_vm_cheri_revoke, OID_AUTO, quarantine_unmapped_reservations,
+    CTLFLAG_RDTUN, &quarantine_unmapped_reservations, true,
+    "Quarantine and revoke fully unmapped reservations");
+#endif
+
 int
 vm_map_remove_locked(vm_map_t map, vm_offset_t start, vm_offset_t end)
 {
@@ -4697,7 +4705,8 @@ vm_map_remove_locked(vm_map_t map, vm_offset_t start, vm_offset_t end)
 	result = vm_map_delete(map, start, end, true);
 	if (vm_map_reservation_is_unmapped(map, reservation)) {
 #ifdef CHERI_CAPREVOKE
-		if (start < VM_MAXUSER_ADDRESS) {
+		if (quarantine_unmapped_reservations &&
+		    start < VM_MAXUSER_ADDRESS) {
 			vm_map_lookup_entry(map, start, &entry);
 			vm_map_entry_quarantine(map, entry);
 		} else
